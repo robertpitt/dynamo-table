@@ -1,0 +1,78 @@
+{
+  "name": "itty-repo",
+  "version": "0.0.1-alpha.1",
+  "description": "Type-safe dynampodb repository layer",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.mts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.mts",
+      "require": "./dist/index.cjs",
+      "import": "./dist/index.mjs"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsdown",
+    "format": "oxfmt src/ examples/ tests/",
+    "format:check": "oxfmt --check src/ examples/ tests/",
+    "test": "vitest",
+    "test:run": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "test:types": "vitest --typecheck",
+    "prepublishOnly": "pnpm run build",
+    "prepare": "husky",
+    "publish:npm": "pnpm publish --access public",
+    "docs:dev": "vitepress dev docs-site",
+    "docs:build": "vitepress build docs-site",
+    "docs:preview": "vitepress preview docs-site"
+  },
+  "keywords": [
+    "itty-repo",
+    "typescript",
+    "dynamodb",
+    "repository"
+  ],
+  "author": "",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git@github.com:robertpitt/itty-repo.git"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "devDependencies": {
+    "@types/node": "^25.0.1",
+    "@valibot/to-json-schema": "^1.5.0",
+    "@vitest/coverage-v8": "^4.0.15",
+    "aws-sdk": "^2.1000.0",
+    "husky": "^9.1.7",
+    "oxfmt": "^0.17.0",
+    "tsdown": "^0.17.0",
+    "tsx": "^4.21.0",
+    "typescript": "^5.0.0",
+    "valibot": "^1.2.0",
+    "vitest": "^4.0.15",
+    "@aws-sdk/client-dynamodb": "^3.958.0",
+    "@aws-sdk/lib-dynamodb": "^3.958.0"
+  },
+  "dependencies": {
+    "@standard-schema/spec": "^1.0.0"
+  },
+  "peerDependencies": {
+    "@aws-sdk/client-dynamodb": "^3",
+    "@aws-sdk/lib-dynamodb": "^3"
+  },
+  "peerDependenciesMeta": {
+    "@aws-sdk/client-dynamodb": {
+      "optional": false
+    }
+  }
+}
