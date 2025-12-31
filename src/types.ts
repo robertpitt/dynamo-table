@@ -1,15 +1,11 @@
 import type { StandardSchemaV1 } from '@standard-schema/spec';
 import type {
-  GetCommandInput,
-  PutCommandInput,
-  UpdateCommandInput,
-  DeleteCommandInput,
   QueryCommandInput,
   ScanCommandInput,
-  BatchGetCommandInput,
-  BatchWriteCommandInput,
-  TransactWriteCommandInput,
-} from '@aws-sdk/lib-dynamodb';
+  BatchGetItemCommandInput,
+  BatchWriteItemCommandInput,
+  TransactWriteItemsCommandInput,
+} from '@aws-sdk/client-dynamodb';
 
 /**
  * Key structure configuration for an entity.
@@ -251,7 +247,7 @@ export interface PaginateOptions<Entity = unknown> {
 /**
  * Batch get options.
  */
-export interface BatchGetOptions extends Omit<BatchGetCommandInput, 'RequestItems'> {}
+export interface BatchGetOptions extends Omit<BatchGetItemCommandInput, 'RequestItems'> {}
 
 /**
  * Batch write request - either a put or delete operation.
@@ -263,7 +259,7 @@ export type BatchWriteRequest<Entity> =
 /**
  * Batch write options.
  */
-export interface BatchWriteOptions extends Omit<BatchWriteCommandInput, 'RequestItems'> {}
+export interface BatchWriteOptions extends Omit<BatchWriteItemCommandInput, 'RequestItems'> {}
 
 /**
  * Transaction write request - put, update, or delete operation.
@@ -283,7 +279,10 @@ export type TransactWriteRequest<Entity> =
 /**
  * Transaction write options.
  */
-export interface TransactWriteOptions extends Omit<TransactWriteCommandInput, 'TransactItems'> {}
+export interface TransactWriteOptions extends Omit<
+  TransactWriteItemsCommandInput,
+  'TransactItems'
+> {}
 
 /**
  * Entity methods interface - the methods available on each entity.

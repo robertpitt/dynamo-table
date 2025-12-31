@@ -61,14 +61,13 @@
     "valibot": "^1.2.0",
     "vitest": "^4.0.15",
     "@aws-sdk/client-dynamodb": "^3.958.0",
-    "@aws-sdk/lib-dynamodb": "^3.958.0"
+    "@aws-sdk/util-dynamodb": "^3.958.0"
   },
   "dependencies": {
     "@standard-schema/spec": "^1.0.0"
   },
   "peerDependencies": {
-    "@aws-sdk/client-dynamodb": "^3",
-    "@aws-sdk/lib-dynamodb": "^3"
+    "@aws-sdk/client-dynamodb": "^3"
   },
   "peerDependenciesMeta": {
     "@aws-sdk/client-dynamodb": {

@@ -1,14 +1,14 @@
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import {
-  GetCommand,
-  PutCommand,
-  UpdateCommand,
-  DeleteCommand,
+  GetItemCommand,
+  PutItemCommand,
+  UpdateItemCommand,
+  DeleteItemCommand,
   QueryCommand,
   ScanCommand,
-  TransactWriteCommand,
-} from '@aws-sdk/lib-dynamodb';
+  TransactWriteItemsCommand,
+} from '@aws-sdk/client-dynamodb';
+import { marshall, unmarshall } from '@aws-sdk/util-dynamodb';
 import type { StandardSchemaV1 } from '@standard-schema/spec';
 import type {
   TableConfig,
@@ -48,7 +48,7 @@ import {
 // ============================================================================
 
 interface OperationContext<Key extends KeyConfig> {
-  client: DynamoDBDocumentClient;
+  client: DynamoDBClient;
   tableName: string;
   keyConfig: Key;
 }
@@ -71,13 +71,13 @@ const get = <Entity, Key extends KeyConfig>(ctx: OperationContext<Key>) => {
 
   return async (key: KeyInput<Entity, Key>, options?: GetOptions): Promise<GetResult<Entity>> => {
     const { Item } = await ctx.client.send(
-      new GetCommand({
+      new GetItemCommand({
         TableName: ctx.tableName,
-        Key: keyOf(key),
+        Key: marshall(keyOf(key)),
         ...options,
       })
     );
-    return { item: (Item as Entity) ?? null };
+    return { item: Item ? (unmarshall(Item) as Entity) : null };
   };
 };
 
@@ -91,15 +91,19 @@ const put = <Entity, Key extends KeyConfig>(ctx: OperationContext<Key>) => {
 
   return async (item: Entity, options?: PutOptions): Promise<PutResult<Entity>> => {
     validateKey(item);
+    const { ExpressionAttributeValues, ...restOptions } = options ?? {};
     const { Attributes } = await ctx.client.send(
-      new PutCommand({
+      new PutItemCommand({
         TableName: ctx.tableName,
-        Item: item as Record<string, unknown>,
-        ...options,
+        Item: marshall(item as Record<string, unknown>),
+        ...restOptions,
+        ExpressionAttributeValues: ExpressionAttributeValues
+          ? marshall(ExpressionAttributeValues)
+          : undefined,
       })
     );
     // Return the item or the returned attributes if ReturnValues was specified
-    return { item: (Attributes as Entity) ?? item };
+    return { item: Attributes ? (unmarshall(Attributes) as Entity) : item };
   };
 };
 
@@ -125,19 +129,23 @@ const update = <Entity, Key extends KeyConfig>(ctx: OperationContext<Key>) => {
       throw new Error('UpdateExpression is required but was not generated');
     }
 
+    const mergedExpressionAttributeValues = mergeAndNormalize(
+      expr.ExpressionAttributeValues,
+      options?.ExpressionAttributeValues
+    );
+
     const { Attributes } = await ctx.client.send(
-      new UpdateCommand({
+      new UpdateItemCommand({
         TableName: ctx.tableName,
-        Key: keyOf(key),
+        Key: marshall(keyOf(key)),
         UpdateExpression: expr.UpdateExpression,
         ExpressionAttributeNames: mergeAndNormalize(
           expr.ExpressionAttributeNames,
           options?.ExpressionAttributeNames
         ) as Record<string, string> | undefined,
-        ExpressionAttributeValues: mergeAndNormalize(
-          expr.ExpressionAttributeValues,
-          options?.ExpressionAttributeValues
-        ),
+        ExpressionAttributeValues: mergedExpressionAttributeValues
+          ? marshall(mergedExpressionAttributeValues)
+          : undefined,
         ReturnValues: options?.ReturnValues ?? 'ALL_NEW',
         ConditionExpression: options?.ConditionExpression,
         ReturnConsumedCapacity: options?.ReturnConsumedCapacity,
@@ -149,7 +157,7 @@ const update = <Entity, Key extends KeyConfig>(ctx: OperationContext<Key>) => {
       throw new Error('Update operation completed but no attributes were returned');
     }
 
-    return { item: (Attributes as Entity) ?? ({} as Entity) };
+    return { item: Attributes ? (unmarshall(Attributes) as Entity) : ({} as Entity) };
   };
 };
 
@@ -161,11 +169,15 @@ const remove = <Entity, Key extends KeyConfig>(ctx: OperationContext<Key>) => {
   const keyOf = createKeyOf<Entity, Key>(ctx.keyConfig);
 
   return async (key: KeyInput<Entity, Key>, options?: DeleteOptions): Promise<DeleteResult> => {
+    const { ExpressionAttributeValues, ...restOptions } = options ?? {};
     await ctx.client.send(
-      new DeleteCommand({
+      new DeleteItemCommand({
         TableName: ctx.tableName,
-        Key: keyOf(key),
-        ...options,
+        Key: marshall(keyOf(key)),
+        ...restOptions,
+        ExpressionAttributeValues: ExpressionAttributeValues
+          ? marshall(ExpressionAttributeValues)
+          : undefined,
       })
     );
     return { success: true };
@@ -178,7 +190,8 @@ const remove = <Entity, Key extends KeyConfig>(ctx: OperationContext<Key>) => {
 
 const query = <Entity, Key extends KeyConfig>(ctx: OperationContext<Key>) => {
   return async (options: QueryOptions<Entity>): Promise<PagedResult<Entity>> => {
-    const { pk, skCondition, indexName, ...rest } = options;
+    const { pk, skCondition, indexName, exclusiveStartKey, ExpressionAttributeValues, ...rest } =
+      options;
 
     const keyCond = buildKeyConditionExpression(
       ctx.keyConfig.pk,
@@ -187,20 +200,25 @@ const query = <Entity, Key extends KeyConfig>(ctx: OperationContext<Key>) => {
       skCondition
     );
 
+    const mergedExpressionAttributeValues = mergeAndNormalize(
+      keyCond.ExpressionAttributeValues,
+      ExpressionAttributeValues
+    );
+
     const result = await ctx.client.send(
       new QueryCommand({
         TableName: ctx.tableName,
         IndexName: indexName,
         ...rest,
-        ...keyCond,
+        KeyConditionExpression: keyCond.KeyConditionExpression,
         ExpressionAttributeNames: mergeAndNormalize(
           keyCond.ExpressionAttributeNames,
           rest.ExpressionAttributeNames
         ) as Record<string, string> | undefined,
-        ExpressionAttributeValues: mergeAndNormalize(
-          keyCond.ExpressionAttributeValues,
-          rest.ExpressionAttributeValues
-        ),
+        ExpressionAttributeValues: mergedExpressionAttributeValues
+          ? marshall(mergedExpressionAttributeValues)
+          : undefined,
+        ExclusiveStartKey: exclusiveStartKey ? marshall(exclusiveStartKey) : undefined,
       })
     );
 
@@ -214,8 +232,16 @@ const query = <Entity, Key extends KeyConfig>(ctx: OperationContext<Key>) => {
 
 const scan = <Entity, Key extends KeyConfig>(ctx: OperationContext<Key>) => {
   return async (options?: ScanOptions): Promise<PagedResult<Entity>> => {
+    const { exclusiveStartKey, ExpressionAttributeValues, ...rest } = options ?? {};
     const result = await ctx.client.send(
-      new ScanCommand({ TableName: ctx.tableName, ...(options ?? {}) })
+      new ScanCommand({
+        TableName: ctx.tableName,
+        ...rest,
+        ExclusiveStartKey: exclusiveStartKey ? marshall(exclusiveStartKey) : undefined,
+        ExpressionAttributeValues: ExpressionAttributeValues
+          ? marshall(ExpressionAttributeValues)
+          : undefined,
+      })
     );
     return toPagedResult(result);
   };
@@ -266,9 +292,37 @@ const paginate = <Entity, Key extends KeyConfig>(ctx: OperationContext<Key>) => 
 
 const transaction = <Entity, Key extends KeyConfig>(ctx: OperationContext<Key>) => {
   return async (requests: TransactWriteRequest<Entity>[]): Promise<void> => {
+    const transactItems = mapTransactItems(ctx.tableName, requests).map((item) => {
+      if ('Put' in item) {
+        return {
+          Put: {
+            ...item.Put,
+            Item: marshall(item.Put.Item),
+          },
+        };
+      }
+      if ('Update' in item) {
+        return {
+          Update: {
+            ...item.Update,
+            Key: marshall(item.Update.Key),
+            ExpressionAttributeValues: item.Update.ExpressionAttributeValues
+              ? marshall(item.Update.ExpressionAttributeValues)
+              : undefined,
+          },
+        };
+      }
+      return {
+        Delete: {
+          ...item.Delete,
+          Key: marshall(item.Delete.Key),
+        },
+      };
+    });
+
     await ctx.client.send(
-      new TransactWriteCommand({
-        TransactItems: mapTransactItems(ctx.tableName, requests),
+      new TransactWriteItemsCommand({
+        TransactItems: transactItems,
       })
     );
   };
@@ -282,15 +336,13 @@ export const table = <Schemas extends Record<string, EntityConfig<StandardSchema
   client: DynamoDBClient,
   config: TableConfig<Schemas>
 ): Table<Schemas> => {
-  const docClient = DynamoDBDocumentClient.from(client);
-
   return Object.fromEntries(
     Object.entries(config.schemas).map(([entityName, entityConfig]) => {
       type Entity = InferEntityOutput<typeof entityConfig.schema>;
       type Key = typeof entityConfig.key;
 
       const ctx: OperationContext<Key> = {
-        client: docClient,
+        client,
         tableName: config.tableName,
         keyConfig: entityConfig.key,
       };

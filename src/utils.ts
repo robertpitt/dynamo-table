@@ -1,4 +1,5 @@
-import type { QueryCommandOutput, ScanCommandOutput } from '@aws-sdk/lib-dynamodb';
+import type { QueryCommandOutput, ScanCommandOutput } from '@aws-sdk/client-dynamodb';
+import { marshall, unmarshall } from '@aws-sdk/util-dynamodb';
 import type { KeyConfig, KeyInput, PagedResult } from './types.js';
 
 // ============================================================================
@@ -154,7 +155,7 @@ export const mergeAndNormalize = <T extends Record<string, unknown> | undefined>
 ): Record<string, unknown> | undefined => {
   const merged = Object.assign({}, ...parts.filter(Boolean));
   const normalized = normalizeExpressionAttributes(merged);
-  return Object.keys(normalized).length ? normalized : undefined;
+  return normalized && Object.keys(normalized).length ? normalized : undefined;
 };
 
 /**
@@ -216,12 +217,16 @@ export const toPagedResult = <Entity>(
 ): PagedResult<Entity> => {
   const hasNextPage = result.LastEvaluatedKey !== undefined;
   const nextPageKey =
-    hasNextPage && result.LastEvaluatedKey ? encodePageKey(result.LastEvaluatedKey) : undefined;
+    hasNextPage && result.LastEvaluatedKey
+      ? encodePageKey(unmarshall(result.LastEvaluatedKey))
+      : undefined;
+
+  const items = result.Items ? result.Items.map((item) => unmarshall(item) as Entity) : [];
 
   return {
     hasNextPage,
     nextPageKey,
-    items: (result.Items as Entity[]) ?? [],
+    items,
   };
 };
 
