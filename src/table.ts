@@ -1,364 +1,305 @@
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import {
-  GetItemCommand,
-  PutItemCommand,
-  UpdateItemCommand,
-  DeleteItemCommand,
-  QueryCommand,
-  ScanCommand,
-  TransactWriteItemsCommand,
-} from '@aws-sdk/client-dynamodb';
-import { marshall, unmarshall } from '@aws-sdk/util-dynamodb';
 import type { StandardSchemaV1 } from '@standard-schema/spec';
 import type {
-  TableConfig,
+  TableOptions,
   Table,
-  EntityConfig,
-  InferEntityOutput,
   KeyConfig,
+  InferOutput,
+  InferInput,
+  ExtendedTableOptions,
+  BatchGetResult,
+  PaginateResult,
   KeyInput,
-  GetResult,
-  PutResult,
+  PartitionKeyValue,
   UpdateInput,
-  UpdateResult,
-  DeleteResult,
-  QueryOptions,
-  ScanOptions,
-  PagedResult,
-  PaginateOptions,
-  TransactWriteRequest,
   GetOptions,
   PutOptions,
   UpdateOptions,
   DeleteOptions,
+  QueryOptions,
+  ScanOptions,
+  PaginateOptions,
+  TransactionRequest,
 } from './types.js';
 import {
-  extractAndValidateKey,
-  validateKeyInput,
-  buildUpdateExpression,
-  buildKeyConditionExpression,
-  mergeAndNormalize,
-  toPagedResult,
-  decodePageKey,
-  mapTransactItems,
-} from './utils.js';
+  buildGetItemCommand,
+  buildBatchGetItemCommand,
+  buildPutItemCommand,
+  buildUpdateItemCommand,
+  buildDeleteItemCommand,
+  buildQueryCommand,
+  buildQueryIndexCommand,
+  buildScanCommand,
+  buildTransactWriteItemsCommand,
+} from './commands.js';
+import {
+  toGetItemResult,
+  toBatchGetResult,
+  toPutItemResult,
+  toUpdateItemResult,
+  toQueryResult,
+  toScanResult,
+  toPaginateResult,
+  toTransactionResult,
+} from './results.js';
+import { parseExclusiveStartKey } from './utils.js';
 
-// ============================================================================
-// Shared Context
-// ============================================================================
-
-interface OperationContext<Key extends KeyConfig> {
-  client: DynamoDBClient;
-  tableName: string;
-  keyConfig: Key;
+function get<
+  TSchema extends StandardSchemaV1,
+  TKeyConfig extends KeyConfig<InferOutput<TSchema>>,
+  TIndexes extends TableOptions<TSchema>['indexes']
+>(
+  client: DynamoDBClient,
+  config: ExtendedTableOptions<TSchema, TKeyConfig, TIndexes>
+) {
+  return async (
+    // @ts-expect-error - KeyInput constraint issue with KeyConfig<TEntity>, works at runtime
+    key: KeyInput<InferOutput<TSchema>, TKeyConfig>,
+    options?: GetOptions
+  ): Promise<InferOutput<TSchema> | undefined> => {
+    const command = buildGetItemCommand(key, options, config);
+    const response = await client.send(command);
+    return toGetItemResult<TSchema>(response);
+  };
 }
 
-// ============================================================================
-// Key Helper Factory
-// ============================================================================
-
-const createKeyOf =
-  <Entity, Key extends KeyConfig>(keyConfig: Key) =>
-  (key: KeyInput<Entity, Key>) =>
-    extractAndValidateKey(key, keyConfig);
-
-// ============================================================================
-// Get Operation
-// ============================================================================
-
-const get = <Entity, Key extends KeyConfig>(ctx: OperationContext<Key>) => {
-  const keyOf = createKeyOf<Entity, Key>(ctx.keyConfig);
-
-  return async (key: KeyInput<Entity, Key>, options?: GetOptions): Promise<GetResult<Entity>> => {
-    const { Item } = await ctx.client.send(
-      new GetItemCommand({
-        TableName: ctx.tableName,
-        Key: marshall(keyOf(key)),
-        ...options,
-      })
-    );
-    return { item: Item ? (unmarshall(Item) as Entity) : null };
-  };
-};
-
-// ============================================================================
-// Put Operation
-// ============================================================================
-
-const put = <Entity, Key extends KeyConfig>(ctx: OperationContext<Key>) => {
-  const validateKey = (item: Entity) =>
-    validateKeyInput(item as KeyInput<Entity, Key>, ctx.keyConfig);
-
-  return async (item: Entity, options?: PutOptions): Promise<PutResult<Entity>> => {
-    validateKey(item);
-    const { ExpressionAttributeValues, ...restOptions } = options ?? {};
-    const { Attributes } = await ctx.client.send(
-      new PutItemCommand({
-        TableName: ctx.tableName,
-        Item: marshall(item as Record<string, unknown>),
-        ...restOptions,
-        ExpressionAttributeValues: ExpressionAttributeValues
-          ? marshall(ExpressionAttributeValues)
-          : undefined,
-      })
-    );
-    // Return the item or the returned attributes if ReturnValues was specified
-    return { item: Attributes ? (unmarshall(Attributes) as Entity) : item };
-  };
-};
-
-// ============================================================================
-// Update Operation
-// ============================================================================
-
-const update = <Entity, Key extends KeyConfig>(ctx: OperationContext<Key>) => {
-  const keyOf = createKeyOf<Entity, Key>(ctx.keyConfig);
-
-  return async (
-    key: KeyInput<Entity, Key>,
-    updates: UpdateInput<Entity, Key>,
-    options?: UpdateOptions
-  ): Promise<UpdateResult<Entity>> => {
-    if (Object.keys(updates).length === 0) {
-      throw new Error('Updates object cannot be empty');
-    }
-
-    const expr = buildUpdateExpression(updates);
-
-    if (!expr.UpdateExpression) {
-      throw new Error('UpdateExpression is required but was not generated');
-    }
-
-    const mergedExpressionAttributeValues = mergeAndNormalize(
-      expr.ExpressionAttributeValues,
-      options?.ExpressionAttributeValues
-    );
-
-    const { Attributes } = await ctx.client.send(
-      new UpdateItemCommand({
-        TableName: ctx.tableName,
-        Key: marshall(keyOf(key)),
-        UpdateExpression: expr.UpdateExpression,
-        ExpressionAttributeNames: mergeAndNormalize(
-          expr.ExpressionAttributeNames,
-          options?.ExpressionAttributeNames
-        ) as Record<string, string> | undefined,
-        ExpressionAttributeValues: mergedExpressionAttributeValues
-          ? marshall(mergedExpressionAttributeValues)
-          : undefined,
-        ReturnValues: options?.ReturnValues ?? 'ALL_NEW',
-        ConditionExpression: options?.ConditionExpression,
-        ReturnConsumedCapacity: options?.ReturnConsumedCapacity,
-        ReturnItemCollectionMetrics: options?.ReturnItemCollectionMetrics,
-      })
-    );
-
-    if (!Attributes && (options?.ReturnValues === 'ALL_NEW' || !options?.ReturnValues)) {
-      throw new Error('Update operation completed but no attributes were returned');
-    }
-
-    return { item: Attributes ? (unmarshall(Attributes) as Entity) : ({} as Entity) };
-  };
-};
-
-// ============================================================================
-// Remove Operation
-// ============================================================================
-
-const remove = <Entity, Key extends KeyConfig>(ctx: OperationContext<Key>) => {
-  const keyOf = createKeyOf<Entity, Key>(ctx.keyConfig);
-
-  return async (key: KeyInput<Entity, Key>, options?: DeleteOptions): Promise<DeleteResult> => {
-    const { ExpressionAttributeValues, ...restOptions } = options ?? {};
-    await ctx.client.send(
-      new DeleteItemCommand({
-        TableName: ctx.tableName,
-        Key: marshall(keyOf(key)),
-        ...restOptions,
-        ExpressionAttributeValues: ExpressionAttributeValues
-          ? marshall(ExpressionAttributeValues)
-          : undefined,
-      })
-    );
-    return { success: true };
-  };
-};
-
-// ============================================================================
-// Query Operation
-// ============================================================================
-
-const query = <Entity, Key extends KeyConfig>(ctx: OperationContext<Key>) => {
-  return async (options: QueryOptions<Entity>): Promise<PagedResult<Entity>> => {
-    const { pk, skCondition, indexName, exclusiveStartKey, ExpressionAttributeValues, ...rest } =
-      options;
-
-    const keyCond = buildKeyConditionExpression(
-      ctx.keyConfig.pk,
-      pk,
-      ctx.keyConfig.sk,
-      skCondition
-    );
-
-    const mergedExpressionAttributeValues = mergeAndNormalize(
-      keyCond.ExpressionAttributeValues,
-      ExpressionAttributeValues
-    );
-
-    const result = await ctx.client.send(
-      new QueryCommand({
-        TableName: ctx.tableName,
-        IndexName: indexName,
-        ...rest,
-        KeyConditionExpression: keyCond.KeyConditionExpression,
-        ExpressionAttributeNames: mergeAndNormalize(
-          keyCond.ExpressionAttributeNames,
-          rest.ExpressionAttributeNames
-        ) as Record<string, string> | undefined,
-        ExpressionAttributeValues: mergedExpressionAttributeValues
-          ? marshall(mergedExpressionAttributeValues)
-          : undefined,
-        ExclusiveStartKey: exclusiveStartKey ? marshall(exclusiveStartKey) : undefined,
-      })
-    );
-
-    return toPagedResult(result);
-  };
-};
-
-// ============================================================================
-// Scan Operation
-// ============================================================================
-
-const scan = <Entity, Key extends KeyConfig>(ctx: OperationContext<Key>) => {
-  return async (options?: ScanOptions): Promise<PagedResult<Entity>> => {
-    const { exclusiveStartKey, ExpressionAttributeValues, ...rest } = options ?? {};
-    const result = await ctx.client.send(
-      new ScanCommand({
-        TableName: ctx.tableName,
-        ...rest,
-        ExclusiveStartKey: exclusiveStartKey ? marshall(exclusiveStartKey) : undefined,
-        ExpressionAttributeValues: ExpressionAttributeValues
-          ? marshall(ExpressionAttributeValues)
-          : undefined,
-      })
-    );
-    return toPagedResult(result);
-  };
-};
-
-// ============================================================================
-// Paginate Operation
-// ============================================================================
-
-const paginate = <Entity, Key extends KeyConfig>(ctx: OperationContext<Key>) => {
-  const queryFn = query<Entity, Key>(ctx);
-  const scanFn = scan<Entity, Key>(ctx);
-
-  return async function* (
-    options: QueryOptions<Entity> | ScanOptions,
-    paginateOptions?: PaginateOptions<Entity>
-  ): AsyncGenerator<Entity[], void, unknown> {
-    const { maxPages = Infinity, onPage } = paginateOptions ?? {};
-
-    let page = 0;
-    let exclusiveStartKey: Record<string, unknown> | undefined = options.exclusiveStartKey;
-
-    const fetchPage = (esk?: Record<string, unknown>) => {
-      const current = { ...options, exclusiveStartKey: esk };
-      return 'pk' in current
-        ? queryFn(current as QueryOptions<Entity>)
-        : scanFn(current as ScanOptions);
-    };
-
-    while (page < maxPages) {
-      const result = await fetchPage(exclusiveStartKey);
-
-      if (onPage) await onPage(result.items);
-      yield result.items;
-
-      if (!result.hasNextPage) return;
-
-      exclusiveStartKey = result.nextPageKey ? decodePageKey(result.nextPageKey) : undefined;
-
-      page++;
-    }
-  };
-};
-
-// ============================================================================
-// Transaction Operation
-// ============================================================================
-
-const transaction = <Entity, Key extends KeyConfig>(ctx: OperationContext<Key>) => {
-  return async (requests: TransactWriteRequest<Entity>[]): Promise<void> => {
-    const transactItems = mapTransactItems(ctx.tableName, requests).map((item) => {
-      if ('Put' in item) {
-        return {
-          Put: {
-            ...item.Put,
-            Item: marshall(item.Put.Item),
-          },
-        };
-      }
-      if ('Update' in item) {
-        return {
-          Update: {
-            ...item.Update,
-            Key: marshall(item.Update.Key),
-            ExpressionAttributeValues: item.Update.ExpressionAttributeValues
-              ? marshall(item.Update.ExpressionAttributeValues)
-              : undefined,
-          },
-        };
-      }
-      return {
-        Delete: {
-          ...item.Delete,
-          Key: marshall(item.Delete.Key),
-        },
-      };
-    });
-
-    await ctx.client.send(
-      new TransactWriteItemsCommand({
-        TransactItems: transactItems,
-      })
-    );
-  };
-};
-
-// ============================================================================
-// Table Factory
-// ============================================================================
-
-export const table = <Schemas extends Record<string, EntityConfig<StandardSchemaV1>>>(
+function batchGet<
+  TSchema extends StandardSchemaV1,
+  TKeyConfig extends KeyConfig<InferOutput<TSchema>>,
+  TIndexes extends TableOptions<TSchema>['indexes']
+>(
   client: DynamoDBClient,
-  config: TableConfig<Schemas>
-): Table<Schemas> => {
-  return Object.fromEntries(
-    Object.entries(config.schemas).map(([entityName, entityConfig]) => {
-      type Entity = InferEntityOutput<typeof entityConfig.schema>;
-      type Key = typeof entityConfig.key;
+  config: ExtendedTableOptions<TSchema, TKeyConfig, TIndexes>
+) {
+  return async (
+    // @ts-expect-error - KeyInput constraint issue with KeyConfig<TEntity>, works at runtime
+    keys: KeyInput<InferOutput<TSchema>, TKeyConfig>[],
+    options?: GetOptions
+  ): Promise<BatchGetResult<InferOutput<TSchema>>> => {
+    if (keys.length === 0) {
+      return { items: [] };
+    }
 
-      const ctx: OperationContext<Key> = {
-        client,
-        tableName: config.tableName,
-        keyConfig: entityConfig.key,
+    // BatchGetItem has a limit of 100 items per request
+    const batchSize = 100;
+    const allItems: InferOutput<TSchema>[] = [];
+
+    for (let i = 0; i < keys.length; i += batchSize) {
+      const batch = keys.slice(i, i + batchSize);
+      const command = buildBatchGetItemCommand(batch, options, config);
+      const response = await client.send(command);
+
+      const result = toBatchGetResult<TSchema>(response, config.tableName);
+      allItems.push(...result.items);
+
+      // Handle unprocessed keys (retry logic could be added here)
+      if (response.UnprocessedKeys && Object.keys(response.UnprocessedKeys).length > 0) {
+        // For now, we'll just log a warning. In production, you might want to retry.
+        console.warn('Some keys were unprocessed in batchGet');
+      }
+    }
+
+    return { items: allItems };
+  };
+}
+
+function put<
+  TSchema extends StandardSchemaV1,
+  TKeyConfig extends KeyConfig<InferOutput<TSchema>>,
+  TIndexes extends TableOptions<TSchema>['indexes']
+>(
+  client: DynamoDBClient,
+  config: ExtendedTableOptions<TSchema, TKeyConfig, TIndexes>
+) {
+  return async (
+    item: InferInput<TSchema>,
+    options?: PutOptions<InferInput<TSchema>>
+  ): Promise<InferOutput<TSchema>> => {
+    const command = buildPutItemCommand(item, options, config);
+    await client.send(command);
+    return toPutItemResult<TSchema>(item);
+  };
+}
+
+function update<
+  TSchema extends StandardSchemaV1,
+  TKeyConfig extends KeyConfig<InferOutput<TSchema>>,
+  TIndexes extends TableOptions<TSchema>['indexes']
+>(
+  client: DynamoDBClient,
+  config: ExtendedTableOptions<TSchema, TKeyConfig, TIndexes>
+) {
+  return async (
+    // @ts-expect-error - KeyInput constraint issue with KeyConfig<TEntity>, works at runtime
+    key: KeyInput<InferOutput<TSchema>, TKeyConfig>,
+    // @ts-expect-error - UpdateInput constraint issue with KeyConfig<TEntity>, works at runtime
+    updates: UpdateInput<InferOutput<TSchema>, TKeyConfig>,
+    options?: UpdateOptions<InferOutput<TSchema>>
+  ): Promise<InferOutput<TSchema>> => {
+    const command = buildUpdateItemCommand(key, updates, options, config);
+    const response = await client.send(command);
+    return toUpdateItemResult<TSchema>(response);
+  };
+}
+
+function remove<
+  TSchema extends StandardSchemaV1,
+  TKeyConfig extends KeyConfig<InferOutput<TSchema>>,
+  TIndexes extends TableOptions<TSchema>['indexes']
+>(
+  client: DynamoDBClient,
+  config: ExtendedTableOptions<TSchema, TKeyConfig, TIndexes>
+) {
+  return async (
+    // @ts-expect-error - KeyInput constraint issue with KeyConfig<TEntity>, works at runtime
+    key: KeyInput<InferOutput<TSchema>, TKeyConfig>,
+    options?: DeleteOptions<InferOutput<TSchema>>
+  ): Promise<void> => {
+    const command = buildDeleteItemCommand(key, options, config);
+    await client.send(command);
+  };
+}
+
+function query<
+  TSchema extends StandardSchemaV1,
+  TKeyConfig extends KeyConfig<InferOutput<TSchema>>,
+  TIndexes extends TableOptions<TSchema>['indexes']
+>(
+  client: DynamoDBClient,
+  config: ExtendedTableOptions<TSchema, TKeyConfig, TIndexes>
+) {
+  return async (
+    // @ts-expect-error - PartitionKeyValue constraint issue with KeyConfig<TEntity>, works at runtime
+    partitionKey: PartitionKeyValue<InferOutput<TSchema>, TKeyConfig>,
+    options?: QueryOptions<InferOutput<TSchema>, TKeyConfig['sk'] extends string ? true : false>
+  ): Promise<InferOutput<TSchema>[]> => {
+    const command = buildQueryCommand(partitionKey, options, config);
+    const response = await client.send(command);
+    return toQueryResult<TSchema>(response);
+  };
+}
+
+function queryIndex<
+  TSchema extends StandardSchemaV1,
+  TKeyConfig extends KeyConfig<InferOutput<TSchema>>,
+  TIndexes extends TableOptions<TSchema>['indexes']
+>(
+  client: DynamoDBClient,
+  config: ExtendedTableOptions<TSchema, TKeyConfig, TIndexes>
+) {
+  return async <TIndexName extends keyof NonNullable<TIndexes> & string>(
+    indexName: TIndexName,
+    partitionKey: PartitionKeyValue<
+      InferOutput<TSchema>,
+      // @ts-expect-error - KeyConfig constraint issue, works at runtime
+      NonNullable<TIndexes>[TIndexName]['key']
+    >,
+    options?: NonNullable<TIndexes>[TIndexName]['key']['sk'] extends string
+      ? QueryOptions<InferOutput<TSchema>, true>
+      : QueryOptions<InferOutput<TSchema>, false>
+  ): Promise<InferOutput<TSchema>[]> => {
+    const command = buildQueryIndexCommand(indexName, partitionKey, options, config);
+    const response = await client.send(command);
+    return toQueryResult<TSchema>(response);
+  };
+}
+
+function scan<
+  TSchema extends StandardSchemaV1,
+  TKeyConfig extends KeyConfig<InferOutput<TSchema>>,
+  TIndexes extends TableOptions<TSchema>['indexes']
+>(
+  client: DynamoDBClient,
+  config: ExtendedTableOptions<TSchema, TKeyConfig, TIndexes>
+) {
+  return async (
+    options?: ScanOptions<InferOutput<TSchema>>
+  ): Promise<InferOutput<TSchema>[]> => {
+    const command = buildScanCommand(options, config);
+    const response = await client.send(command);
+    return toScanResult<TSchema>(response);
+  };
+}
+
+function paginate<
+  TSchema extends StandardSchemaV1,
+  TKeyConfig extends KeyConfig<InferOutput<TSchema>>,
+  TIndexes extends TableOptions<TSchema>['indexes']
+>(
+  client: DynamoDBClient,
+  config: ExtendedTableOptions<TSchema, TKeyConfig, TIndexes>
+) {
+  return async function* (
+    options: QueryOptions<InferOutput<TSchema>> | ScanOptions<InferOutput<TSchema>>,
+    paginateOptions?: PaginateOptions<InferOutput<TSchema>>
+  ): AsyncGenerator<PaginateResult<InferOutput<TSchema>>, void, unknown> {
+    let exclusiveStartKey: Record<string, any> | undefined = parseExclusiveStartKey(options.exclusiveStartKey);
+    const pageLimit = paginateOptions?.limit ?? options.limit;
+
+    while (true) {
+      // For now, paginate only supports scan operations
+      const scanOptions: ScanOptions<InferOutput<TSchema>> = {
+        ...(options as ScanOptions<InferOutput<TSchema>>),
+        limit: pageLimit,
+        exclusiveStartKey: exclusiveStartKey,
       };
 
-      const methods = {
-        get: get<Entity, Key>(ctx),
-        put: put<Entity, Key>(ctx),
-        update: update<Entity, Key>(ctx),
-        delete: remove<Entity, Key>(ctx),
-        query: query<Entity, Key>(ctx),
-        scan: scan<Entity, Key>(ctx),
-        paginate: paginate<Entity, Key>(ctx),
-        transaction: transaction<Entity, Key>(ctx),
-      };
+      const command = buildScanCommand(scanOptions, config);
+      const response = await client.send(command);
 
-      return [entityName, methods];
-    })
-  ) as Table<Schemas>;
+      const result = toPaginateResult<TSchema>(response);
+
+      yield result;
+
+      if (!result.hasNextPage) {
+        break;
+      }
+
+      exclusiveStartKey = response.LastEvaluatedKey;
+    }
+  };
+}
+
+function transaction<
+  TSchema extends StandardSchemaV1,
+  TKeyConfig extends KeyConfig<InferOutput<TSchema>>,
+  TIndexes extends TableOptions<TSchema>['indexes']
+>(
+  client: DynamoDBClient,
+  config: ExtendedTableOptions<TSchema, TKeyConfig, TIndexes>
+) {
+  return async (
+    // @ts-expect-error - TransactionRequest constraint issue with KeyConfig<TEntity>, works at runtime
+    requests: TransactionRequest<InferInput<TSchema>, TKeyConfig>[]
+  ): Promise<{ items: InferOutput<TSchema>[] }> => {
+    if (requests.length === 0) {
+      return { items: [] };
+    }
+
+    const command = buildTransactWriteItemsCommand(requests, config);
+    await client.send(command);
+    return toTransactionResult<TSchema>(requests);
+  };
+}
+
+export function table<
+  TSchema extends StandardSchemaV1,
+  TKeyConfig extends KeyConfig<InferOutput<TSchema>> = TableOptions<TSchema>['key'],
+  TIndexes extends TableOptions<TSchema>['indexes'] = TableOptions<TSchema>['indexes']
+>(
+  client: DynamoDBClient,
+  config: ExtendedTableOptions<TSchema, TKeyConfig, TIndexes>
+): Table<ExtendedTableOptions<TSchema, TKeyConfig, TIndexes>> {
+  return {
+    get: get(client, config),
+    put: put(client, config),
+    update: update(client, config),
+    delete: remove(client, config),
+    query: query(client, config),
+    queryIndex: queryIndex(client, config),
+    scan: scan(client, config),
+    batchGet: batchGet(client, config),
+    paginate: paginate(client, config),
+    transaction: transaction(client, config),
+  };
 };

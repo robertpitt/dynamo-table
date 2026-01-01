@@ -1,429 +1,364 @@
 # itty-repo
 
-A lightweight, type-safe DynamoDB repository layer for TypeScript that uses Standard Schema V1 for type inference. Designed to complement [itty-spec](https://robertpitt.github.io/itty-spec/) in serverless API development.
+A lightweight, type-safe DynamoDB repository layer for TypeScript that uses Valibot for type inference. Designed for a clean, intuitive developer experience.
 
 ## Features
 
-- **Type-safe**: Full TypeScript inference from Standard Schema schemas (Zod, Valibot, etc.)
-- **Lightweight**: No runtime validation overhead - types only
-- **Flexible**: Supports both single-entity tables with GSIs and multi-entity single-table designs
-- **Complete**: All DynamoDB operations (get, put, update, delete, query, scan, batch, transact)
+- **Type-safe**: Full TypeScript inference from Valibot schemas
+- **Lightweight**: Minimal runtime overhead
+- **Intuitive API**: Query by field names, not pk/sk abstractions
+- **Complete**: All DynamoDB operations (get, put, update, delete, query, queryIndex, scan, batchGet, transact)
+- **Helper Functions**: Chainable filter and condition builders
+- **Custom Methods**: Add repository pattern methods to table instances
 
 ## Installation
 
 ```bash
-pnpm add itty-repo @standard-schema/spec aws-sdk
+pnpm add itty-repo valibot @aws-sdk/client-dynamodb
 # or
-npm install itty-repo @standard-schema/spec aws-sdk
+npm install itty-repo valibot @aws-sdk/client-dynamodb
 # or
-yarn add itty-repo @standard-schema/spec aws-sdk
+yarn add itty-repo valibot @aws-sdk/client-dynamodb
 ```
 
 ## Quick Start
 
-### Single-Entity Table
-
 ```typescript
-import { DocumentClient } from 'aws-sdk/clients/dynamodb';
-import { Repo } from 'itty-repo';
-import { z } from 'zod';
+import * as v from 'valibot';
+import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
+import { table, key, index, filter, condition } from 'itty-repo';
 
-// Define your entity schema
-const UserSchema = z.object({
-  pk: z.string(), // Partition key
-  name: z.string(),
-  email: z.string().email(),
-  createdAt: z.string(),
+// Initialize the DynamoDB client
+const client = new DynamoDBClient({ region: 'us-east-1' });
+
+// Define your schema using Valibot
+const UserSchema = v.object({
+  id: v.pipe(v.string(), v.uuid()),
+  name: v.string(),
+  email: v.string(),
+  createdAt: v.string(),
+  updatedAt: v.string(),
 });
 
-// Create repository
-const client = new DocumentClient({ region: 'us-east-1' });
-const userRepo = new Repo(client, {
-  tableName: 'Users',
+// Create a table
+const users = table(client, {
+  tableName: process.env.USERS_TABLE_NAME!,
+  key: key('id'), // Single partition key
   schema: UserSchema,
-  gsis: [
-    { name: 'EmailIndex', partitionKey: 'email' },
+  indexes: [
+    index('emailIndex', key('email')), // GSI on email
   ],
 });
 
-// Use the repository
-const user = await userRepo.get('USER#123');
-await userRepo.put({
-  pk: 'USER#123',
+// Use the table
+const user = await users.get({ id: 'user-123' });
+await users.put({
+  id: crypto.randomUUID(),
   name: 'John Doe',
   email: 'john@example.com',
   createdAt: new Date().toISOString(),
+  updatedAt: new Date().toISOString(),
 });
 
-// Query by GSI
-const usersByEmail = await userRepo.query({
-  pk: 'john@example.com',
-  indexName: 'EmailIndex',
-});
-```
-
-### Multi-Entity Single-Table Design
-
-```typescript
-import { DocumentClient } from 'aws-sdk/clients/dynamodb';
-import { Repo } from 'itty-repo';
-import { z } from 'zod';
-
-// Define entity schema (entity type inferred from PK pattern)
-const EntitySchema = z.object({
-  pk: z.string(), // e.g., "USER#123" or "ORDER#456"
-  sk: z.string(), // e.g., "PROFILE" or "ORDER#789"
-  name: z.string().optional(),
-  email: z.string().email().optional(),
-  orderDate: z.string().optional(),
-  // ... other fields
-});
-
-const client = new DocumentClient({ region: 'us-east-1' });
-const repo = new Repo(client, {
-  tableName: 'MainTable',
-  schema: EntitySchema,
-});
-
-// Store user profile
-await repo.put({
-  pk: 'USER#123',
-  sk: 'PROFILE',
-  name: 'John Doe',
-  email: 'john@example.com',
-});
-
-// Store order
-await repo.put({
-  pk: 'USER#123',
-  sk: 'ORDER#456',
-  orderDate: '2024-01-01',
-});
-
-// Query all items for a user
-const userItems = await repo.query({
-  pk: 'USER#123',
-});
-
-// Query orders for a user (using begins_with)
-import { beginsWith } from 'itty-repo';
-const orders = await repo.query({
-  pk: 'USER#123',
-  skCondition: beginsWith('ORDER#'),
-});
+// Query by index
+const userByEmail = await users.queryIndex('emailIndex', { email: 'john@example.com' });
 ```
 
 ## API Reference
 
-### Repo Class
-
-#### Constructor
+### Table Factory
 
 ```typescript
-new Repo(client: DocumentClient, config: RepoConfig<T>)
+table(client: DynamoDBClient, config: TableConfig<Schema>): Table<Schema>
 ```
 
 **Config Options:**
 - `tableName: string` - DynamoDB table name
-- `schema: StandardSchemaV1` - Standard Schema V1 schema
-- `gsis?: GSIDefinition[]` - Global Secondary Index definitions
-- `pkField?: string` - Partition key field name (default: `'pk'`)
-- `skField?: string` - Sort key field name (default: `'sk'`)
+- `key: KeyConfig` - Key configuration (use `key()` helper)
+- `schema: BaseSchema` - Valibot schema
+- `ttl?: string` - Optional TTL field name
+- `indexes?: IndexConfig[]` - Optional index configurations
+- `methods?: Record<string, Function>` - Optional custom methods
 
-#### Methods
+### Helper Functions
 
-##### `get(pk: string, sk?: string, options?: GetOptions): Promise<GetResult<T>>`
+#### `key(pk: string, sk?: string): KeyConfig`
 
-Get a single item by partition key and optional sort key.
-
-```typescript
-const result = await repo.get('USER#123');
-// result.item is T | null
-```
-
-##### `put(item: EntityInput<T>, options?: PutOptions): Promise<PutResult>`
-
-Put (create or replace) an item.
+Creates a key configuration.
 
 ```typescript
-await repo.put({
-  pk: 'USER#123',
-  name: 'John Doe',
-});
+key('id')                    // Single partition key
+key('orgId', 'id')           // Composite key
+key('userId', 'createdAt')   // Composite key with sort key
 ```
 
-##### `update(pk: string, sk: string | undefined, options: UpdateOptions): Promise<UpdateResult>`
+#### `index(name: string, keyConfig: KeyConfig, options?: IndexOptions): IndexConfig`
 
-Update an item using UpdateExpression.
+Creates an index configuration.
 
 ```typescript
-await repo.update('USER#123', undefined, {
-  updateExpression: 'SET #name = :name',
-  expressionAttributeNames: { '#name': 'name' },
-  expressionAttributeValues: { ':name': 'Jane Doe' },
-});
+index('emailIndex', key('email'))
+index('userOrdersIndex', key('userId', 'createdAt'), { projection: 'KEYS_ONLY' })
+index('statusIndex', key('status', 'createdAt'), {
+  projection: { include: ['id', 'status', 'createdAt'] }
+})
 ```
 
-##### `delete(pk: string, sk?: string, options?: DeleteOptions): Promise<DeleteResult>`
+#### `filter(builder: (f: FilterBuilder) => string): FilterExpression`
 
-Delete an item by partition key and optional sort key.
+Builds filter expressions for query/scan operations.
 
 ```typescript
-await repo.delete('USER#123', 'PROFILE');
+filter(f => f.eq('status', 'active'))
+filter(f => f.and(
+  f.eq('userId', '123'),
+  f.between('createdAt', startDate, endDate)
+))
 ```
 
-##### `query(options: QueryOptions): Promise<QueryResult<T>>`
+#### `condition(builder: (c: ConditionBuilder) => string): ConditionExpression`
 
-Query items by partition key (and optional sort key condition).
+Builds condition expressions for put/update/delete operations.
 
 ```typescript
-// Simple query
-const result = await repo.query({ pk: 'USER#123' });
-
-// Query with sort key condition
-import { beginsWith, between } from 'itty-repo';
-const result = await repo.query({
-  pk: 'USER#123',
-  skCondition: beginsWith('ORDER#'),
-});
-
-// Query by GSI
-const result = await repo.query({
-  pk: 'user@example.com',
-  indexName: 'EmailIndex',
-});
+condition(c => c.notExists('id'))
+condition(c => c.and(
+  c.exists('id'),
+  c.eq('status', 'active')
+))
 ```
 
-**Query Options:**
-- `pk: string` - Partition key value
-- `skCondition?: SKCondition` - Sort key condition
-- `indexName?: string` - GSI name for querying
-- `filterExpression?: string` - Filter expression
-- `limit?: number` - Limit number of items
-- `consistentRead?: boolean` - Use consistent read
-- `scanIndexForward?: boolean` - Scan index forward
-- `exclusiveStartKey?: Record<string, unknown>` - Pagination key
-- `projectionExpression?: string` - Projection expression
-- `returnConsumedCapacity?: 'INDEXES' | 'TOTAL' | 'NONE'`
+### Table Methods
 
-##### `scan(options?: ScanOptions): Promise<ScanResult<T>>`
+#### `get(key: KeyInput<Entity, Key>, options?: GetOptions): Promise<GetResult<Entity>>`
 
-Scan the entire table.
+Get a single item by its key.
 
 ```typescript
-const result = await repo.scan({
-  filterExpression: '#status = :active',
-  expressionAttributeNames: { '#status': 'status' },
-  expressionAttributeValues: { ':status': 'active' },
-});
+const result = await users.get({ id: 'user-123' });
+// result.item is Entity | null
 ```
 
-##### `batchGet(keys: Array<{ pk: string; sk?: string }>, options?: BatchGetOptions): Promise<BatchGetResult<T>>`
+#### `batchGet(keys: KeyInput<Entity, Key>[], options?: BatchGetOptions): Promise<{ items: Entity[] }>`
 
 Batch get multiple items.
 
 ```typescript
-const result = await repo.batchGet([
-  { pk: 'USER#123' },
-  { pk: 'USER#456', sk: 'PROFILE' },
+const result = await users.batchGet([
+  { id: 'user-1' },
+  { id: 'user-2' },
 ]);
+// result.items is Entity[]
 ```
 
-##### `batchWrite(requests: Array<PutRequest | DeleteRequest>, options?: BatchWriteOptions): Promise<BatchWriteResult>`
+#### `put(item: Entity, options?: PutOptions): Promise<PutResult<Entity>>`
 
-Batch write (put/delete) multiple items.
-
-```typescript
-await repo.batchWrite([
-  { type: 'put', item: { pk: 'USER#123', name: 'John' } },
-  { type: 'delete', pk: 'USER#456', sk: 'PROFILE' },
-]);
-```
-
-##### `transactWrite(requests: Array<TransactRequest>, options?: TransactWriteOptions): Promise<TransactWriteResult>`
-
-Transact write multiple items.
+Put (create or replace) an item.
 
 ```typescript
-await repo.transactWrite([
-  {
-    type: 'put',
-    item: { pk: 'USER#123', name: 'John' },
-    conditionExpression: 'attribute_not_exists(pk)',
-  },
-  {
-    type: 'update',
-    pk: 'USER#456',
-    updateExpression: 'SET #count = #count + :inc',
-    expressionAttributeNames: { '#count': 'count' },
-    expressionAttributeValues: { ':inc': 1 },
-  },
-]);
-```
-
-### Query Helpers
-
-```typescript
-import {
-  beginsWith,
-  between,
-  equals,
-  lessThan,
-  lessThanOrEqual,
-  greaterThan,
-  greaterThanOrEqual,
-} from 'itty-repo';
-
-// Use in query options
-await repo.query({
-  pk: 'USER#123',
-  skCondition: beginsWith('ORDER#'),
-});
-
-await repo.query({
-  pk: 'USER#123',
-  skCondition: between('2024-01-01', '2024-12-31'),
-});
-```
-
-### Key Utilities
-
-```typescript
-import {
-  extractPartitionKey,
-  extractSortKey,
-  extractKeys,
-  inferEntityType,
-  buildKey,
-} from 'itty-repo';
-
-const entity = { pk: 'USER#123', sk: 'PROFILE', name: 'John' };
-const pk = extractPartitionKey(entity); // 'USER#123'
-const sk = extractSortKey(entity); // 'PROFILE'
-const keys = extractKeys(entity); // { pk: 'USER#123', sk: 'PROFILE' }
-const entityType = inferEntityType('USER#123'); // 'User'
-const key = buildKey('USER#123', 'PROFILE'); // { pk: 'USER#123', sk: 'PROFILE' }
-```
-
-## Type Safety
-
-`itty-repo` provides full type inference from your Standard Schema schemas. All methods are fully typed, and **all TypeScript type information is preserved**, including:
-
-- **Branded types** (e.g., `string & { __brand: 'UUID' }`)
-- **Literal types** (e.g., `'pending' | 'active' | 'inactive'`)
-- **Template literal types** (e.g., `` `${string}-${string}-${string}-${string}-${string}` ``)
-- **Union types, intersection types, and all other TypeScript types**
-
-### Basic Type Inference
-
-```typescript
-const UserSchema = z.object({
-  pk: z.string(),
-  name: z.string(),
-  email: z.string().email(),
-});
-
-const repo = new Repo(client, { tableName: 'Users', schema: UserSchema });
-
-// TypeScript knows the exact shape!
-const user = await repo.get('USER#123');
-// user.item is { pk: string; name: string; email: string } | null
-
-await repo.put({
-  pk: 'USER#123',
-  name: 'John',
+await users.put({
+  id: crypto.randomUUID(),
+  name: 'John Doe',
   email: 'john@example.com',
-  // TypeScript error if you add invalid fields!
+  createdAt: new Date().toISOString(),
+  updatedAt: new Date().toISOString(),
+});
+
+// Conditional put (only if doesn't exist)
+await users.put(item, {
+  condition: condition(c => c.notExists('id')),
 });
 ```
 
-### Branded Types and Literal Types
+#### `update(key: KeyInput<Entity, Key>, updates: UpdateInput<Entity, Key>, options?: UpdateOptions): Promise<UpdateResult<Entity>>`
 
-Branded types, literal types, and template literal types are fully preserved through the type inference chain:
+Update an item by its key.
 
 ```typescript
-// Define branded types
-type UUID = string & { __brand: 'UUID' };
-type Email = string & { __brand: 'Email' };
-type Status = 'pending' | 'active' | 'inactive';
+await users.update(
+  { id: 'user-123' },
+  { name: 'Jane Doe', updatedAt: new Date().toISOString() }
+);
 
-// Create schema with branded types (using Standard Schema V1)
-const UserSchema = {
-  '~standard': {
-    input: {} as { pk: string; userId: string; email: string; status: string },
-    output: {} as { pk: string; userId: UUID; email: Email; status: Status },
-    validate: (v: unknown) => ({ value: v, issues: [] }),
-    parse: (v: unknown) => ({ value: v, issues: [] }),
-  },
-} as StandardSchemaV1<{
-  input: { pk: string; userId: string; email: string; status: string };
-  output: { pk: string; userId: UUID; email: Email; status: Status };
-}>;
+// Conditional update
+await users.update(
+  { id: 'user-123' },
+  { status: 'active' },
+  {
+    condition: condition(c => c.eq('status', 'pending')),
+  }
+);
+```
 
-const repo = new Repo(client, { tableName: 'Users', schema: UserSchema });
+#### `delete(key: KeyInput<Entity, Key>, options?: DeleteOptions): Promise<DeleteResult>`
 
-// All branded types are preserved!
-const result = await repo.get('USER#123');
-if (result.item) {
-  const userId: UUID = result.item.userId; // ✅ UUID type preserved
-  const email: Email = result.item.email;   // ✅ Email type preserved
-  const status: Status = result.item.status; // ✅ Status literal type preserved
+Delete an item by its key.
+
+```typescript
+await users.delete({ id: 'user-123' });
+
+// Conditional delete
+await users.delete(
+  { id: 'user-123' },
+  {
+    condition: condition(c => c.exists('id')),
+  }
+);
+```
+
+#### `query(keyFields: Partial<Entity>, options?: QueryOptions<Entity>): Promise<PagedResult<Entity>>`
+
+Query items by field names (automatically mapped to pk/sk).
+
+```typescript
+// Query by partition key
+const result = await users.query({ id: 'user-123' });
+
+// Query with filter
+const result = await users.query(
+  { id: 'user-123' },
+  {
+    filter: filter(f => f.gt('createdAt', '2025-01-01')),
+  }
+);
+
+// Query with pagination
+const page1 = await users.query({ id: 'user-123' }, { limit: 10 });
+const page2 = await users.query(
+  { id: 'user-123' },
+  { limit: 10, exclusiveStartKey: page1.nextPageKey }
+);
+```
+
+#### `queryIndex(indexName: string, keyFields: Partial<Entity>, options?: QueryOptions<Entity>): Promise<PagedResult<Entity>>`
+
+Query a Global Secondary Index or Local Secondary Index.
+
+```typescript
+// Query by index
+const result = await users.queryIndex('emailIndex', { email: 'john@example.com' });
+
+// Query index with filter
+const result = await users.queryIndex(
+  'userOrdersIndex',
+  { userId: 'user-123' },
+  {
+    filter: filter(f => f.between('createdAt', startDate, endDate)),
+  }
+);
+```
+
+#### `scan(options?: ScanOptions): Promise<PagedResult<Entity>>`
+
+Scan the entire table.
+
+```typescript
+const result = await users.scan();
+
+// Scan with filter
+const result = await users.scan({
+  filter: filter(f => f.eq('status', 'active')),
+  limit: 100,
+});
+```
+
+#### `paginate(options, paginateOptions?): AsyncGenerator<Entity[], void, unknown>`
+
+Paginate through query or scan results.
+
+```typescript
+for await (const page of users.paginate(
+  { id: 'user-123' },
+  { maxPages: 10, onPage: (items) => console.log(`Got ${items.length} items`) }
+)) {
+  // Process each page
+  console.log(page);
 }
-
-// Query results also preserve types
-const queryResult = await repo.query({ pk: 'USER#123' });
-queryResult.items.forEach((item) => {
-  const userId: UUID = item.userId; // ✅ Types preserved in arrays too
-});
 ```
 
-See `examples/branded-types.ts` for a complete example with branded types and template literal types.
+#### `transaction(requests: TransactWriteRequest<Entity>[]): Promise<void>`
 
-## Integration with itty-spec
-
-You can share schemas between `itty-spec` contracts and `itty-repo`:
+Transaction write multiple items.
 
 ```typescript
-import { createContract } from 'itty-spec';
-import { Repo } from 'itty-repo';
-import { z } from 'zod';
+await users.transaction([
+  { type: 'put', item: { id: '1', name: 'User 1' } },
+  { type: 'update', key: { id: '2' }, updateExpression: 'SET #name = :name', ... },
+  { type: 'delete', key: { id: '3' } },
+]);
+```
 
-// Shared schema
-const UserSchema = z.object({
-  id: z.string().uuid(),
-  name: z.string(),
-  email: z.string().email(),
-});
+## Filter Builder Methods
 
-// Use in itty-spec contract
-const contract = createContract({
-  getUser: {
-    path: '/users/:id',
-    method: 'GET',
-    pathParams: z.object({ id: z.string().uuid() }),
-    responses: {
-      200: {
-        'application/json': {
-          body: UserSchema,
-        },
-      },
+The filter builder supports the following methods:
+
+- `eq(attribute, value)` - Equality
+- `ne(attribute, value)` - Inequality
+- `lt(attribute, value)` - Less than
+- `lte(attribute, value)` - Less than or equal
+- `gt(attribute, value)` - Greater than
+- `gte(attribute, value)` - Greater than or equal
+- `beginsWith(attribute, value)` - Begins with
+- `contains(attribute, value)` - Contains
+- `between(attribute, start, end)` - Between
+- `in(attribute, values[])` - In array
+- `exists(attribute)` - Attribute exists
+- `notExists(attribute)` - Attribute does not exist
+- `size(attribute)` - Size of attribute
+- `sizeGt(attribute, value)` - Size greater than
+- `sizeLt(attribute, value)` - Size less than
+- `and(...conditions)` - Logical AND
+- `or(...conditions)` - Logical OR
+- `not(condition)` - Logical NOT
+
+## Condition Builder Methods
+
+The condition builder supports all filter builder methods plus:
+
+- `attributeType(attribute, type)` - Attribute type check
+- `sizeGte(attribute, value)` - Size greater than or equal
+- `sizeLte(attribute, value)` - Size less than or equal
+
+## Custom Methods
+
+Add custom repository methods to your table instance:
+
+```typescript
+const users = table(client, {
+  tableName: 'users',
+  key: key('id'),
+  schema: UserSchema,
+  methods: {
+    getActiveUsers: (table) => {
+      return async () => {
+        return table.scan({
+          filter: filter(f => f.eq('status', 'active')),
+        });
+      };
+    },
+    getUserByEmail: (table) => {
+      return async (email: string) => {
+        const result = await table.queryIndex('emailIndex', { email });
+        return result.items[0] ?? null;
+      };
     },
   },
 });
 
-// Use in itty-repo (with PK/SK)
-const UserWithKeysSchema = UserSchema.extend({
-  pk: z.string(),
-  sk: z.string(),
-});
-
-const userRepo = new Repo(client, {
-  tableName: 'Users',
-  schema: UserWithKeysSchema,
-});
+// Use custom methods
+const activeUsers = await users.getActiveUsers();
+const user = await users.getUserByEmail('john@example.com');
 ```
+
+## Type Safety
+
+`itty-repo` provides full type inference from your Valibot schemas. All methods are fully typed, and TypeScript type information is preserved, including:
+
+- **Branded types** (e.g., `string & { __brand: 'UUID' }`)
+- **Literal types** (e.g., `'pending' | 'active' | 'inactive'`)
+- **Template literal types**
+- **Union types, intersection types, and all other TypeScript types**
 
 ## License
 
 MIT
-

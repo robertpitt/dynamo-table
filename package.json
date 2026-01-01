@@ -67,10 +67,14 @@
     "@standard-schema/spec": "^1.0.0"
   },
   "peerDependencies": {
-    "@aws-sdk/client-dynamodb": "^3"
+    "@aws-sdk/client-dynamodb": "^3",
+    "valibot": "^1.0.0"
   },
   "peerDependenciesMeta": {
     "@aws-sdk/client-dynamodb": {
+      "optional": false
+    },
+    "valibot": {
       "optional": false
     }
   }

@@ -1,140 +1,129 @@
 /**
- * Example: Multi-Entity Table with Standard Schema
+ * Example: Single-Entity Table with Valibot Schema
  *
- * This example demonstrates using itty-repo with a multi-entity table design
- * where different entities share the same DynamoDB table but have different schemas.
+ * This example demonstrates using itty-repo with a single-entity table design
+ * matching the ideal DX from idea.ts.
  */
 
+import * as v from 'valibot';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { table } from '../src/index.js';
-import * as v from 'valibot';
 
-// Define entity schemas using Valibot (or any Standard Schema compatible library)
-// Valibot schemas are already StandardSchemaV1 compatible, so no cast is needed
-const UserEntity = v.object({
-  id: v.string(),
+// Define entity schema using Valibot
+const AuditSchema = v.object({
+    id: v.pipe(v.string(), v.uuid()),
+    userId: v.pipe(v.string(), v.uuid()),
+    accountId: v.pipe(v.string(), v.uuid()),
+    resellerId: v.pipe(v.string(), v.uuid()),
+    requestBody: v.string(),
+    requestHeaders: v.object({}),
+    responseBody: v.string(),
+    responseHeaders: v.object({}),
+    responseCode: v.number(),
+    updatedAt: v.string(),
+    createdAt: v.string(),
+    ttl: v.optional(v.number()),
+});
+
+const dynamo = new DynamoDBClient({ region: process.env.AWS_REGION || 'us-east-1' })
+
+// Create table with single entity schema
+const audits = table(dynamo, {
+    tableName: process.env.AUDITS_TABLE_NAME!,
+    schema: AuditSchema,
+    key: { pk: 'id' },
+    ttl: 'ttl',
+    indexes: {
+        auditsByUserId: { key: { pk: 'userId', sk: 'createdAt' }, projection: 'KEYS_ONLY' },
+        auditsByAccountId: { key: { pk: 'accountId', sk: 'createdAt' }, projection: 'KEYS_ONLY' },
+        auditsByResellerId: { key: { pk: 'resellerId', sk: 'createdAt' }, projection: 'KEYS_ONLY' },
+        auditsByStatus: {
+            key: { pk: 'responseCode', sk: 'createdAt' },
+            projection: { include: ['id', 'responseCode', 'createdAt', 'resellerId', 'accountId', 'userId'] },
+        },
+    },
+});
+
+
+audits.get({ id: "123" })
+audits.query({ id: "test" })
+audits.batchGet([{ id: "test" }])
+audits.put({ id: "test", userId: "test", accountId: "test", resellerId: "test", requestBody: "test", requestHeaders: {}, responseBody: "test", responseHeaders: {}, responseCode: 200, updatedAt: "test", createdAt: "test", ttl: 1000 })
+audits.update({ id: "test" }, { responseCode: 200, updatedAt: "test" })
+audits.delete({ id: "test" })
+audits.queryIndex('auditsByUserId', { userId: "test" })
+audits.queryIndex('auditsByAccountId', { accountId: "test" })
+audits.queryIndex('auditsByResellerId', { resellerId: "test" }, {
+  sortKey: (sk) => sk.between("2024-01-01T00:00:00Z", "2024-12-31T23:59:59Z")
+})
+audits.queryIndex('auditsByStatus', { responseCode: 200 }, {
+  sortKey: (sk) => sk.between("2025-01", "2025-01")
+})
+audits.queryIndex("auditsByResellerId", { resellerId: "test" })
+audits.scan({ filter: (f) => f.gt('responseCode', 399), limit: 100 })
+audits.paginate({ filter: (f) => f.gt('responseCode', 399), limit: 100 })
+
+const UserSchema = v.object({
+  id: v.pipe(v.string(), v.uuid()),
+  orgId: v.pipe(v.string(), v.uuid()),
   name: v.string(),
-  email: v.string(),
-  createdAt: v.string(),
-  updatedAt: v.string(),
+  email: v.pipe(v.string(), v.email()),
+  phone: v.pipe(v.string()),
+  address: v.object({
+    street: v.string(),
+    city: v.string(),
+    state: v.string(),
+    zip: v.string(),
+  }),
+  dob: v.pipe(v.string(), v.isoDateTime()),
+  gender: v.picklist(['male', 'female', 'other']),
+  status: v.picklist(['active', 'inactive', 'pending']),
+  role: v.picklist(['admin', 'user', 'superadmin']),
+  permissions: v.array(v.string()),
+  tags: v.array(v.string()),
+    metadata: v.array(v.object({
+        key: v.string(),
+        value: v.string(),
+    })),
+  createdAt: v.optional(v.pipe(v.string(), v.isoDateTime()), () => new Date().toISOString()),
+  updatedAt: v.optional(v.pipe(v.string(), v.isoDateTime()), () => new Date().toISOString()),
+  ttl: v.optional(v.number()),
 });
 
-const UserEmailIndexEntity = v.object({
-  email: v.string(),
-  id: v.string(),
-});
-
-// Create table with multiple entity schemas
-// Note: Use 'as const' on the key config to preserve literal types for better type inference
-// This ensures that 'id' and 'email' are inferred as literal types, not widened to 'string'
-const usersTable = table(new DynamoDBClient({ region: process.env.AWS_REGION || 'us-east-1' }), {
+const users = table(dynamo, {
   tableName: process.env.USERS_TABLE_NAME!,
-  schemas: {
-    User: { key: { pk: 'id' } as const, schema: UserEntity },
-    UserEmailIndex: { key: { pk: 'email', sk: 'id' } as const, schema: UserEmailIndexEntity },
+  schema: UserSchema,
+  key: { pk: 'orgId', sk: 'id' },
+  ttl: 'ttl',
+  indexes: {
+    usersByEmail: { key: { pk: 'email', sk: 'createdAt' }, projection: 'KEYS_ONLY' },
+    usersByStatus: { key: { pk: 'status', sk: 'createdAt' }, projection: 'KEYS_ONLY' },
+    usersByRole: { key: { pk: 'role', sk: 'createdAt' }, projection: 'KEYS_ONLY' },
+    usersByGender: { key: { pk: 'gender', sk: 'createdAt' }, projection: 'KEYS_ONLY' },
+    usersByDob: { key: { pk: 'dob', sk: 'createdAt' }, projection: 'KEYS_ONLY' },
+    usersByAddress: { key: { pk: 'address', sk: 'createdAt' }, projection: 'KEYS_ONLY' },
+    usersByPhone: { key: { pk: 'phone', sk: 'createdAt' }, projection: 'KEYS_ONLY' },
+    usersByName: { key: { pk: 'name', sk: 'createdAt' }, projection: 'KEYS_ONLY' },
+    usersByPermissions: { key: { pk: 'permissions', sk: 'createdAt' }, projection: 'KEYS_ONLY' },
   },
+  methods: {},
 });
 
-usersTable.User.get({ id: 'test' });
-usersTable.UserEmailIndex.get({ email: 'test', id: 'test' });
-usersTable.User.query({
-  pk: 'test',
-});
+users.get({ id: "456", orgId: "123" }).then(result => result?.address.city);
 
-/**
- * Create a new user
- */
-export async function createUser(userData: { id: string; name: string; email: string }) {
-  const now = new Date().toISOString();
+users.batchGet([{orgId: "123", id: "456"}, {orgId: "123", id: "789"}]).then(
+    result => result.items.map(item => item.address.city)
+);
 
-  return await usersTable.User.put({
-    id: userData.id,
-    name: userData.name,
-    email: userData.email,
-    createdAt: now,
-    updatedAt: now,
-  });
-}
+users.delete({ id: "456", orgId: "123" })
 
-/**
- * Get a user by ID
- */
-export async function getUserById(id: string) {
-  const result = await usersTable.User.get({ id });
-  return result.item;
-}
-
-/**
- * Get a user by email (using email index entity)
- */
-export async function getUserByEmail(email: string) {
-  const result = await usersTable.UserEmailIndex.query({
-    pk: email,
-    limit: 1,
-  });
-
-  return result.items[0] ?? null;
-}
-
-/**
- * Update a user's name
- */
-export async function updateUserName(id: string, newName: string) {
-  return await usersTable.User.update(
-    { id },
-    {
-      name: newName,
-      updatedAt: new Date().toISOString(),
-    }
-  );
-}
-
-/**
- * Delete a user
- */
-export async function deleteUser(id: string) {
-  return await usersTable.User.delete({ id });
-}
-
-/**
- * Query users (example - would need appropriate GSI or table structure)
- */
-export async function queryUsers() {
-  // Note: This would require a GSI or the table to have a queryable structure
-  // This is just an example of the API
-  const result = await usersTable.User.scan({
-    limit: 10,
-  });
-
-  return result.items;
-}
-
-// Example usage (commented out for demonstration)
-/*
-async function main() {
-  // Create a user
-  await createUser({
-    id: '123',
-    name: 'John Doe',
-    email: 'john@example.com',
-  });
-
-  // Get user by ID
-  const user = await getUserById('123');
-  console.log('User:', user);
-
-  // Get user by email
-  const userByEmail = await getUserByEmail('john@example.com');
-  console.log('User by email:', userByEmail);
-
-  // Update user name
-  await updateUserName('123', 'Jane Doe');
-
-  // Query users
-  const users = await queryUsers();
-  console.log('Users:', users);
-
-  // Delete user
-  await deleteUser('123');
-}
-*/
+users.queryIndex("usersByName", { name: "Test" }, {
+  sortKey: (sk) => sk.beginsWith("John"),
+  filter: (f) => f.and(
+    f.eq("permissions[0]", ""),
+    f.eq("tags[0]", ""),
+    f.contains("metadata.key", "test"),
+    f.eq("metadata.value", ""),
+    f.eq('address.city', "New York")
+  )
+})
